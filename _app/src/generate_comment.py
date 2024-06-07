@@ -61,7 +61,7 @@ def download_from_s3(s3_bucket: str, s3_path: str, local_path: str):
 
 
 def get_prompts(assignment: str) -> dict:
-    s3_solutions_dir = f"academy/2/homework-keys/{assignment}"
+    s3_solutions_dir = f"academy/2/homework-keys/streaming-pipelines"
     local_solutions_dir = os.path.join(os.getcwd(), 'prompts', assignment)
     os.makedirs(local_solutions_dir, exist_ok=True)
     prompts = [
@@ -73,6 +73,7 @@ def get_prompts(assignment: str) -> dict:
     prompt_contents = {}
     for prompt in prompts:
         s3_path = f"{s3_solutions_dir}/{prompt}"
+        print(s3_path)
         local_path = os.path.join(local_solutions_dir, prompt)
         download_from_s3(s3_bucket, s3_path, local_path)
         if not os.path.exists(local_path):

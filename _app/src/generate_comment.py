@@ -73,7 +73,7 @@ def get_prompts(assignment: str) -> dict:
     prompt_contents = {}
     for prompt in prompts:
         s3_path = f"{s3_solutions_dir}/{prompt}"
-        print(s3_path)
+        logger.info(s3_path)
         local_path = os.path.join(local_solutions_dir, prompt)
         download_from_s3(s3_bucket, s3_path, local_path)
         if not os.path.exists(local_path):

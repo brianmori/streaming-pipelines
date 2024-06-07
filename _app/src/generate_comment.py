@@ -1,8 +1,12 @@
 import os
 import re
+import base64
+
 import logging
 import requests
 import boto3
+from pydantic import Base64Encoder
+
 from util import get_logger, get_api_key, check_aws_creds, get_git_creds, get_assignment, \
     get_submission_dir  # , get_changed_files
 from openai import OpenAI
@@ -126,248 +130,9 @@ Please ensure your feedback is positive, focused, and constructive, offering spe
 
 
 def generate_grading_prompt(submissions: dict) -> str:
-    user_prompt = """
-    ## Task: Provide a Grade
-
-### Instructions
-
-Evaluate the student's homework submission in the following areas: `Query Conversion` and `PySpark Jobs`. Assign a rating of **Proficient**, **Satisfactory**, **Needs Improvement**, or **Unsatisfactory** for each area. A passing grade requires at least "Satisfactory" in both areas.
-
-### Grading Rubric
-
-**Proficient**
-session_ddl.sql: Well-structured. Has the necessary columns session_start, session_end, session_date, event_count, device_family, browser_family. And it is partitioned by session_date
-session_job.py: Well-structured and error-free. Demonstrates robust Spark capabilities. Demonstrates understand of Spark Streaming and session_window function
-
-**Satisfactory**
-session_ddl.sql: Has the right structure but misses one of the critical columns
-session_job.py: Demonstrates robust Spark Streaming capabilities. Demonstrates understanding of Spark Streaming and session_window function. Now errors there
-
-**Needs Improvement**
-session_ddl.sql: Misses critical dimensions in the group by
-session_job.py: Misses critical dimensions in the group by
-
-**Unsatisfactory**
-session_ddl.sql: Missing too many columns, Does not sessionize. Code does not run 
-session_job.py: Does not use session_window function. Code does not run 
-
-
-**Example solution:**
-```sql
-CREATE TABLE IF NOT EXISTS <username>.dataexpert_sesions (
-  host STRING,
-  session_id STRING,
-  user_id BIGINT,
-  is_logged_in BOOLEAN,
-  country STRING,
-  state STRING,
-  city STRING,
-  browser_family STRING,
-  device_family STRING,
-  window_start TIMESTAMP,
-  window_end TIMESTAMP,
-  event_count BIGINT,
-  session_date DATE
-)
-USING ICEBERG
-PARTITIONED BY (session_date)
-```
-
-```python
-import ast
-import sys
-import requests
-import json
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lit, hash, session_window, from_json, udf,unix_timestamp, coalesce
-from pyspark.sql.types import StringType, IntegerType, TimestampType, StructType, StructField, MapType
-from awsglue.utils import getResolvedOptions
-from awsglue.context import GlueContext
-from awsglue.job import Job
-
-# TODO PUT YOUR API KEY HERE
-GEOCODING_API_KEY = '<geocoding api key>'
-
-def geocode_ip_address(ip_address):
-    url = "https://api.ip2location.io"
-    response = requests.get(url, params={
-        'ip': ip_address,
-        'key': GEOCODING_API_KEY
-    })
-
-    if response.status_code != 200:
-        # Return empty dict if request failed
-        return {}
-
-    data = json.loads(response.text)
-
-    # Extract the country and state from the response
-    # This might change depending on the actual response structure
-    country = data.get('country_code', '')
-    state = data.get('region_name', '')
-    city = data.get('city_name', '')
-
-    return {'country': country, 'state': state, 'city': city}
-
-spark = (SparkSession.builder
-         .getOrCreate())
-args = getResolvedOptions(sys.argv, ["JOB_NAME",
-                                     "ds",
-                                     'output_table',
-                                     'kafka_credentials',
-                                     'checkpoint_location'
-                                     ])
-run_date = args['ds']
-output_table = args['output_table']
-checkpoint_location = args['checkpoint_location']
-kafka_credentials = ast.literal_eval(args['kafka_credentials'])
-glueContext = GlueContext(spark.sparkContext)
-spark = glueContext.spark_session
-
-# Retrieve Kafka credentials from environment variables
-kafka_key = kafka_credentials['KAFKA_WEB_TRAFFIC_KEY']
-kafka_secret = kafka_credentials['KAFKA_WEB_TRAFFIC_SECRET']
-kafka_bootstrap_servers = kafka_credentials['KAFKA_WEB_BOOTSTRAP_SERVER']
-kafka_topic = kafka_credentials['KAFKA_TOPIC']
-
-if kafka_key is None or kafka_secret is None:
-    raise ValueError("KAFKA_WEB_TRAFFIC_KEY and KAFKA_WEB_TRAFFIC_SECRET must be set as environment variables.")
-
-# Kafka configuration
-
-start_timestamp = f"{run_date}T00:00:00.000Z"
-
-# Define the schema of the Kafka message value
-schema = StructType([
-    StructField("url", StringType(), True),
-    StructField("referrer", StringType(), True),
-    StructField("user_agent", StructType([
-        StructField("family", StringType(), True),
-        StructField("major", StringType(), True),
-        StructField("minor", StringType(), True),
-        StructField("patch", StringType(), True),
-        StructField("device", StructType([
-            StructField("family", StringType(), True),
-            StructField("major", StringType(), True),
-            StructField("minor", StringType(), True),
-            StructField("patch", StringType(), True),
-        ]), True),
-        StructField("os", StructType([
-            StructField("family", StringType(), True),
-            StructField("major", StringType(), True),
-            StructField("minor", StringType(), True),
-            StructField("patch", StringType(), True),
-        ]), True)
-    ]), True),
-    StructField("headers", MapType(keyType=StringType(), valueType=StringType()), True),
-    StructField("host", StringType(), True),
-    StructField("ip", StringType(), True),
-    StructField("user_id", IntegerType(), True),
-    StructField("academy_id", IntegerType(), True),
-    StructField("event_time", TimestampType(), True)
-])
-
-
-spark.sql(f
-CREATE TABLE IF NOT EXISTS {output_table} (
-  host STRING,
-  session_id STRING,
-  user_id BIGINT,
-  is_logged_in BOOLEAN,
-  country STRING,
-  state STRING,
-  city STRING,
-  browser_family STRING,
-  device_family STRING,
-  window_start TIMESTAMP,
-  window_end TIMESTAMP,
-  event_count BIGINT,
-  session_date DATE
-)
-USING ICEBERG
-PARTITIONED BY (session_date)
-
-# Read from Kafka in batch mode
-kafka_df = (spark 
-    .readStream 
-    .format("kafka") \
-    .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
-    .option("subscribe", kafka_topic) \
-    .option("startingOffsets", "latest") \
-    .option("maxOffsetsPerTrigger", 10000) \
-    .option("kafka.security.protocol", "SASL_SSL") \
-    .option("kafka.sasl.mechanism", "PLAIN") \
-    .option("kafka.sasl.jaas.config",
-            f'org.apache.kafka.common.security.plain.PlainLoginModule required username="{kafka_key}" password="{kafka_secret}";') \
-    .load()
-)
-
-def decode_col(column):
-    return column.decode('utf-8')
-
-decode_udf = udf(decode_col, StringType())
-
-geocode_schema = StructType([
-    StructField("country", StringType(), True),
-    StructField("city", StringType(), True),
-    StructField("state", StringType(), True),
-])
-
-geocode_udf = udf(geocode_ip_address, geocode_schema)
-
-tumbling_window_df = kafka_df \
-    .withColumn("decoded_value", decode_udf(col("value"))) \
-    .withColumn("value", from_json(col("decoded_value"), schema)) \
-    .withColumn("geodata", geocode_udf(col("value.ip"))) \
-    .withWatermark("timestamp", "30 seconds")
-
-by_country = tumbling_window_df.groupBy(session_window(col("timestamp"), "5 minutes"),
-                                        col("value.ip"),
-                                        col("value.host"),
-                                        col("value.user_id"),
-                                        col("geodata.country"),
-                                        col("geodata.state"),
-                                        col("geodata.city"),
-                                        col("value.user_agent.family").alias("browser_family"),
-                                        col("value.user_agent.device.family").alias("device_family")
-                                        ) \
-    .count() \
-    .select(
-        col("host"),
-        hash(col("ip"), unix_timestamp(col("session_window.start")).cast("string"), coalesce(
-            col("user_id").cast("string"), lit('logged_out'))).cast("string").alias("session_id"),
-        col("user_id"),
-        col("user_id").isNotNull().alias("is_logged_in"),
-        col("country"),
-        col("state"),
-        col("city"),
-        col("browser_family"),
-        col("device_family"),
-        col("session_window.start").alias("window_start"),
-        col("session_window.end").alias("window_end"),
-        col("count").alias("event_count"),
-        col("session_window.start").cast("date").alias("session_date")
-    )
-
-query = by_country \
-    .writeStream \
-    .format("iceberg") \
-    .outputMode("append") \
-    .trigger(processingTime="5 seconds") \
-    .option("fanout-enabled", "true") \
-    .option("checkpointLocation", checkpoint_location) \
-    .toTable(output_table)
-
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
-
-# stop the job after 60 minutes
-# PLEASE DO NOT REMOVE TIMEOUT
-query.awaitTermination(timeout=60*60)
-
-### Final Grade
-
-Based on the evaluations above, recommend a final grade and a brief summary of the assessment."""
+    user_prompt = "IyMgVGFzazogUHJvdmlkZSBhIEdyYWRlCgojIyMgSW5zdHJ1Y3Rpb25zCgpFdmFsdWF0ZSB0aGUgc3R1ZGVudCdzIGhvbWV3b3JrIHN1Ym1pc3Npb24gaW4gdGhlIGZvbGxvd2luZyBhcmVhczogYFF1ZXJ5IENvbnZlcnNpb25gIGFuZCBgUHlTcGFyayBKb2JzYC4gQXNzaWduIGEgcmF0aW5nIG9mICoqUHJvZmljaWVudCoqLCAqKlNhdGlzZmFjdG9yeSoqLCAqKk5lZWRzIEltcHJvdmVtZW50KiosIG9yICoqVW5zYXRpc2ZhY3RvcnkqKiBmb3IgZWFjaCBhcmVhLiBBIHBhc3NpbmcgZ3JhZGUgcmVxdWlyZXMgYXQgbGVhc3QgIlNhdGlzZmFjdG9yeSIgaW4gYm90aCBhcmVhcy4KCiMjIyBHcmFkaW5nIFJ1YnJpYwoKKipQcm9maWNpZW50KioKc2Vzc2lvbl9kZGwuc3FsOiBXZWxsLXN0cnVjdHVyZWQuIEhhcyB0aGUgbmVjZXNzYXJ5IGNvbHVtbnMgc2Vzc2lvbl9zdGFydCwgc2Vzc2lvbl9lbmQsIHNlc3Npb25fZGF0ZSwgZXZlbnRfY291bnQsIGRldmljZV9mYW1pbHksIGJyb3dzZXJfZmFtaWx5LiBBbmQgaXQgaXMgcGFydGl0aW9uZWQgYnkgc2Vzc2lvbl9kYXRlCnNlc3Npb25fam9iLnB5OiBXZWxsLXN0cnVjdHVyZWQgYW5kIGVycm9yLWZyZWUuIERlbW9uc3RyYXRlcyByb2J1c3QgU3BhcmsgY2FwYWJpbGl0aWVzLiBEZW1vbnN0cmF0ZXMgdW5kZXJzdGFuZCBvZiBTcGFyayBTdHJlYW1pbmcgYW5kIHNlc3Npb25fd2luZG93IGZ1bmN0aW9uCgoqKlNhdGlzZmFjdG9yeSoqCnNlc3Npb25fZGRsLnNxbDogSGFzIHRoZSByaWdodCBzdHJ1Y3R1cmUgYnV0IG1pc3NlcyBvbmUgb2YgdGhlIGNyaXRpY2FsIGNvbHVtbnMKc2Vzc2lvbl9qb2IucHk6IERlbW9uc3RyYXRlcyByb2J1c3QgU3BhcmsgU3RyZWFtaW5nIGNhcGFiaWxpdGllcy4gRGVtb25zdHJhdGVzIHVuZGVyc3RhbmRpbmcgb2YgU3BhcmsgU3RyZWFtaW5nIGFuZCBzZXNzaW9uX3dpbmRvdyBmdW5jdGlvbi4gTm93IGVycm9ycyB0aGVyZQoKKipOZWVkcyBJbXByb3ZlbWVudCoqCnNlc3Npb25fZGRsLnNxbDogTWlzc2VzIGNyaXRpY2FsIGRpbWVuc2lvbnMgaW4gdGhlIGdyb3VwIGJ5CnNlc3Npb25fam9iLnB5OiBNaXNzZXMgY3JpdGljYWwgZGltZW5zaW9ucyBpbiB0aGUgZ3JvdXAgYnkKCioqVW5zYXRpc2ZhY3RvcnkqKgpzZXNzaW9uX2RkbC5zcWw6IE1pc3NpbmcgdG9vIG1hbnkgY29sdW1ucywgRG9lcyBub3Qgc2Vzc2lvbml6ZS4gQ29kZSBkb2VzIG5vdCBydW4gCnNlc3Npb25fam9iLnB5OiBEb2VzIG5vdCB1c2Ugc2Vzc2lvbl93aW5kb3cgZnVuY3Rpb24uIENvZGUgZG9lcyBub3QgcnVuIAoKCioqRXhhbXBsZSBzb2x1dGlvbjoqKgpgYGBzcWwKQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMgPHVzZXJuYW1lPi5kYXRhZXhwZXJ0X3Nlc2lvbnMgKAogIGhvc3QgU1RSSU5HLAogIHNlc3Npb25faWQgU1RSSU5HLAogIHVzZXJfaWQgQklHSU5ULAogIGlzX2xvZ2dlZF9pbiBCT09MRUFOLAogIGNvdW50cnkgU1RSSU5HLAogIHN0YXRlIFNUUklORywKICBjaXR5IFNUUklORywKICBicm93c2VyX2ZhbWlseSBTVFJJTkcsCiAgZGV2aWNlX2ZhbWlseSBTVFJJTkcsCiAgd2luZG93X3N0YXJ0IFRJTUVTVEFNUCwKICB3aW5kb3dfZW5kIFRJTUVTVEFNUCwKICBldmVudF9jb3VudCBCSUdJTlQsCiAgc2Vzc2lvbl9kYXRlIERBVEUKKQpVU0lORyBJQ0VCRVJHClBBUlRJVElPTkVEIEJZIChzZXNzaW9uX2RhdGUpCmBgYAoKYGBgcHl0aG9uCmltcG9ydCBhc3QKaW1wb3J0IHN5cwppbXBvcnQgcmVxdWVzdHMKaW1wb3J0IGpzb24KZnJvbSBweXNwYXJrLnNxbCBpbXBvcnQgU3BhcmtTZXNzaW9uCmZyb20gcHlzcGFyay5zcWwuZnVuY3Rpb25zIGltcG9ydCBjb2wsIGxpdCwgaGFzaCwgc2Vzc2lvbl93aW5kb3csIGZyb21fanNvbiwgdWRmLHVuaXhfdGltZXN0YW1wLCBjb2FsZXNjZQpmcm9tIHB5c3Bhcmsuc3FsLnR5cGVzIGltcG9ydCBTdHJpbmdUeXBlLCBJbnRlZ2VyVHlwZSwgVGltZXN0YW1wVHlwZSwgU3RydWN0VHlwZSwgU3RydWN0RmllbGQsIE1hcFR5cGUKZnJvbSBhd3NnbHVlLnV0aWxzIGltcG9ydCBnZXRSZXNvbHZlZE9wdGlvbnMKZnJvbSBhd3NnbHVlLmNvbnRleHQgaW1wb3J0IEdsdWVDb250ZXh0CmZyb20gYXdzZ2x1ZS5qb2IgaW1wb3J0IEpvYgoKIyBUT0RPIFBVVCBZT1VSIEFQSSBLRVkgSEVSRQpHRU9DT0RJTkdfQVBJX0tFWSA9ICc8Z2VvY29kaW5nIGFwaSBrZXk+JwoKZGVmIGdlb2NvZGVfaXBfYWRkcmVzcyhpcF9hZGRyZXNzKToKICAgIHVybCA9ICJodHRwczovL2FwaS5pcDJsb2NhdGlvbi5pbyIKICAgIHJlc3BvbnNlID0gcmVxdWVzdHMuZ2V0KHVybCwgcGFyYW1zPXsKICAgICAgICAnaXAnOiBpcF9hZGRyZXNzLAogICAgICAgICdrZXknOiBHRU9DT0RJTkdfQVBJX0tFWQogICAgfSkKCiAgICBpZiByZXNwb25zZS5zdGF0dXNfY29kZSAhPSAyMDA6CiAgICAgICAgIyBSZXR1cm4gZW1wdHkgZGljdCBpZiByZXF1ZXN0IGZhaWxlZAogICAgICAgIHJldHVybiB7fQoKICAgIGRhdGEgPSBqc29uLmxvYWRzKHJlc3BvbnNlLnRleHQpCgogICAgIyBFeHRyYWN0IHRoZSBjb3VudHJ5IGFuZCBzdGF0ZSBmcm9tIHRoZSByZXNwb25zZQogICAgIyBUaGlzIG1pZ2h0IGNoYW5nZSBkZXBlbmRpbmcgb24gdGhlIGFjdHVhbCByZXNwb25zZSBzdHJ1Y3R1cmUKICAgIGNvdW50cnkgPSBkYXRhLmdldCgnY291bnRyeV9jb2RlJywgJycpCiAgICBzdGF0ZSA9IGRhdGEuZ2V0KCdyZWdpb25fbmFtZScsICcnKQogICAgY2l0eSA9IGRhdGEuZ2V0KCdjaXR5X25hbWUnLCAnJykKCiAgICByZXR1cm4geydjb3VudHJ5JzogY291bnRyeSwgJ3N0YXRlJzogc3RhdGUsICdjaXR5JzogY2l0eX0KCnNwYXJrID0gKFNwYXJrU2Vzc2lvbi5idWlsZGVyCiAgICAgICAgIC5nZXRPckNyZWF0ZSgpKQphcmdzID0gZ2V0UmVzb2x2ZWRPcHRpb25zKHN5cy5hcmd2LCBbIkpPQl9OQU1FIiwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICJkcyIsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAnb3V0cHV0X3RhYmxlJywKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICdrYWZrYV9jcmVkZW50aWFscycsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAnY2hlY2twb2ludF9sb2NhdGlvbicKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIF0pCnJ1bl9kYXRlID0gYXJnc1snZHMnXQpvdXRwdXRfdGFibGUgPSBhcmdzWydvdXRwdXRfdGFibGUnXQpjaGVja3BvaW50X2xvY2F0aW9uID0gYXJnc1snY2hlY2twb2ludF9sb2NhdGlvbiddCmthZmthX2NyZWRlbnRpYWxzID0gYXN0LmxpdGVyYWxfZXZhbChhcmdzWydrYWZrYV9jcmVkZW50aWFscyddKQpnbHVlQ29udGV4dCA9IEdsdWVDb250ZXh0KHNwYXJrLnNwYXJrQ29udGV4dCkKc3BhcmsgPSBnbHVlQ29udGV4dC5zcGFya19zZXNzaW9uCgojIFJldHJpZXZlIEthZmthIGNyZWRlbnRpYWxzIGZyb20gZW52aXJvbm1lbnQgdmFyaWFibGVzCmthZmthX2tleSA9IGthZmthX2NyZWRlbnRpYWxzWydLQUZLQV9XRUJfVFJBRkZJQ19LRVknXQprYWZrYV9zZWNyZXQgPSBrYWZrYV9jcmVkZW50aWFsc1snS0FGS0FfV0VCX1RSQUZGSUNfU0VDUkVUJ10Ka2Fma2FfYm9vdHN0cmFwX3NlcnZlcnMgPSBrYWZrYV9jcmVkZW50aWFsc1snS0FGS0FfV0VCX0JPT1RTVFJBUF9TRVJWRVInXQprYWZrYV90b3BpYyA9IGthZmthX2NyZWRlbnRpYWxzWydLQUZLQV9UT1BJQyddCgppZiBrYWZrYV9rZXkgaXMgTm9uZSBvciBrYWZrYV9zZWNyZXQgaXMgTm9uZToKICAgIHJhaXNlIFZhbHVlRXJyb3IoIktBRktBX1dFQl9UUkFGRklDX0tFWSBhbmQgS0FGS0FfV0VCX1RSQUZGSUNfU0VDUkVUIG11c3QgYmUgc2V0IGFzIGVudmlyb25tZW50IHZhcmlhYmxlcy4iKQoKIyBLYWZrYSBjb25maWd1cmF0aW9uCgpzdGFydF90aW1lc3RhbXAgPSBmIntydW5fZGF0ZX1UMDA6MDA6MDAuMDAwWiIKCiMgRGVmaW5lIHRoZSBzY2hlbWEgb2YgdGhlIEthZmthIG1lc3NhZ2UgdmFsdWUKc2NoZW1hID0gU3RydWN0VHlwZShbCiAgICBTdHJ1Y3RGaWVsZCgidXJsIiwgU3RyaW5nVHlwZSgpLCBUcnVlKSwKICAgIFN0cnVjdEZpZWxkKCJyZWZlcnJlciIsIFN0cmluZ1R5cGUoKSwgVHJ1ZSksCiAgICBTdHJ1Y3RGaWVsZCgidXNlcl9hZ2VudCIsIFN0cnVjdFR5cGUoWwogICAgICAgIFN0cnVjdEZpZWxkKCJmYW1pbHkiLCBTdHJpbmdUeXBlKCksIFRydWUpLAogICAgICAgIFN0cnVjdEZpZWxkKCJtYWpvciIsIFN0cmluZ1R5cGUoKSwgVHJ1ZSksCiAgICAgICAgU3RydWN0RmllbGQoIm1pbm9yIiwgU3RyaW5nVHlwZSgpLCBUcnVlKSwKICAgICAgICBTdHJ1Y3RGaWVsZCgicGF0Y2giLCBTdHJpbmdUeXBlKCksIFRydWUpLAogICAgICAgIFN0cnVjdEZpZWxkKCJkZXZpY2UiLCBTdHJ1Y3RUeXBlKFsKICAgICAgICAgICAgU3RydWN0RmllbGQoImZhbWlseSIsIFN0cmluZ1R5cGUoKSwgVHJ1ZSksCiAgICAgICAgICAgIFN0cnVjdEZpZWxkKCJtYWpvciIsIFN0cmluZ1R5cGUoKSwgVHJ1ZSksCiAgICAgICAgICAgIFN0cnVjdEZpZWxkKCJtaW5vciIsIFN0cmluZ1R5cGUoKSwgVHJ1ZSksCiAgICAgICAgICAgIFN0cnVjdEZpZWxkKCJwYXRjaCIsIFN0cmluZ1R5cGUoKSwgVHJ1ZSksCiAgICAgICAgXSksIFRydWUpLAogICAgICAgIFN0cnVjdEZpZWxkKCJvcyIsIFN0cnVjdFR5cGUoWwogICAgICAgICAgICBTdHJ1Y3RGaWVsZCgiZmFtaWx5IiwgU3RyaW5nVHlwZSgpLCBUcnVlKSwKICAgICAgICAgICAgU3RydWN0RmllbGQoIm1ham9yIiwgU3RyaW5nVHlwZSgpLCBUcnVlKSwKICAgICAgICAgICAgU3RydWN0RmllbGQoIm1pbm9yIiwgU3RyaW5nVHlwZSgpLCBUcnVlKSwKICAgICAgICAgICAgU3RydWN0RmllbGQoInBhdGNoIiwgU3RyaW5nVHlwZSgpLCBUcnVlKSwKICAgICAgICBdKSwgVHJ1ZSkKICAgIF0pLCBUcnVlKSwKICAgIFN0cnVjdEZpZWxkKCJoZWFkZXJzIiwgTWFwVHlwZShrZXlUeXBlPVN0cmluZ1R5cGUoKSwgdmFsdWVUeXBlPVN0cmluZ1R5cGUoKSksIFRydWUpLAogICAgU3RydWN0RmllbGQoImhvc3QiLCBTdHJpbmdUeXBlKCksIFRydWUpLAogICAgU3RydWN0RmllbGQoImlwIiwgU3RyaW5nVHlwZSgpLCBUcnVlKSwKICAgIFN0cnVjdEZpZWxkKCJ1c2VyX2lkIiwgSW50ZWdlclR5cGUoKSwgVHJ1ZSksCiAgICBTdHJ1Y3RGaWVsZCgiYWNhZGVteV9pZCIsIEludGVnZXJUeXBlKCksIFRydWUpLAogICAgU3RydWN0RmllbGQoImV2ZW50X3RpbWUiLCBUaW1lc3RhbXBUeXBlKCksIFRydWUpCl0pCgoKc3Bhcmsuc3FsKGYKQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMge291dHB1dF90YWJsZX0gKAogIGhvc3QgU1RSSU5HLAogIHNlc3Npb25faWQgU1RSSU5HLAogIHVzZXJfaWQgQklHSU5ULAogIGlzX2xvZ2dlZF9pbiBCT09MRUFOLAogIGNvdW50cnkgU1RSSU5HLAogIHN0YXRlIFNUUklORywKICBjaXR5IFNUUklORywKICBicm93c2VyX2ZhbWlseSBTVFJJTkcsCiAgZGV2aWNlX2ZhbWlseSBTVFJJTkcsCiAgd2luZG93X3N0YXJ0IFRJTUVTVEFNUCwKICB3aW5kb3dfZW5kIFRJTUVTVEFNUCwKICBldmVudF9jb3VudCBCSUdJTlQsCiAgc2Vzc2lvbl9kYXRlIERBVEUKKQpVU0lORyBJQ0VCRVJHClBBUlRJVElPTkVEIEJZIChzZXNzaW9uX2RhdGUpCgojIFJlYWQgZnJvbSBLYWZrYSBpbiBiYXRjaCBtb2RlCmthZmthX2RmID0gKHNwYXJrIAogICAgLnJlYWRTdHJlYW0gCiAgICAuZm9ybWF0KCJrYWZrYSIpICAgICAub3B0aW9uKCJrYWZrYS5ib290c3RyYXAuc2VydmVycyIsIGthZmthX2Jvb3RzdHJhcF9zZXJ2ZXJzKSAgICAgLm9wdGlvbigic3Vic2NyaWJlIiwga2Fma2FfdG9waWMpICAgICAub3B0aW9uKCJzdGFydGluZ09mZnNldHMiLCAibGF0ZXN0IikgICAgIC5vcHRpb24oIm1heE9mZnNldHNQZXJUcmlnZ2VyIiwgMTAwMDApICAgICAub3B0aW9uKCJrYWZrYS5zZWN1cml0eS5wcm90b2NvbCIsICJTQVNMX1NTTCIpICAgICAub3B0aW9uKCJrYWZrYS5zYXNsLm1lY2hhbmlzbSIsICJQTEFJTiIpICAgICAub3B0aW9uKCJrYWZrYS5zYXNsLmphYXMuY29uZmlnIiwKICAgICAgICAgICAgZidvcmcuYXBhY2hlLmthZmthLmNvbW1vbi5zZWN1cml0eS5wbGFpbi5QbGFpbkxvZ2luTW9kdWxlIHJlcXVpcmVkIHVzZXJuYW1lPSJ7a2Fma2Ffa2V5fSIgcGFzc3dvcmQ9IntrYWZrYV9zZWNyZXR9IjsnKSAgICAgLmxvYWQoKQopCgpkZWYgZGVjb2RlX2NvbChjb2x1bW4pOgogICAgcmV0dXJuIGNvbHVtbi5kZWNvZGUoJ3V0Zi04JykKCmRlY29kZV91ZGYgPSB1ZGYoZGVjb2RlX2NvbCwgU3RyaW5nVHlwZSgpKQoKZ2VvY29kZV9zY2hlbWEgPSBTdHJ1Y3RUeXBlKFsKICAgIFN0cnVjdEZpZWxkKCJjb3VudHJ5IiwgU3RyaW5nVHlwZSgpLCBUcnVlKSwKICAgIFN0cnVjdEZpZWxkKCJjaXR5IiwgU3RyaW5nVHlwZSgpLCBUcnVlKSwKICAgIFN0cnVjdEZpZWxkKCJzdGF0ZSIsIFN0cmluZ1R5cGUoKSwgVHJ1ZSksCl0pCgpnZW9jb2RlX3VkZiA9IHVkZihnZW9jb2RlX2lwX2FkZHJlc3MsIGdlb2NvZGVfc2NoZW1hKQoKdHVtYmxpbmdfd2luZG93X2RmID0ga2Fma2FfZGYgICAgIC53aXRoQ29sdW1uKCJkZWNvZGVkX3ZhbHVlIiwgZGVjb2RlX3VkZihjb2woInZhbHVlIikpKSAgICAgLndpdGhDb2x1bW4oInZhbHVlIiwgZnJvbV9qc29uKGNvbCgiZGVjb2RlZF92YWx1ZSIpLCBzY2hlbWEpKSAgICAgLndpdGhDb2x1bW4oImdlb2RhdGEiLCBnZW9jb2RlX3VkZihjb2woInZhbHVlLmlwIikpKSAgICAgLndpdGhXYXRlcm1hcmsoInRpbWVzdGFtcCIsICIzMCBzZWNvbmRzIikKCmJ5X2NvdW50cnkgPSB0dW1ibGluZ193aW5kb3dfZGYuZ3JvdXBCeShzZXNzaW9uX3dpbmRvdyhjb2woInRpbWVzdGFtcCIpLCAiNSBtaW51dGVzIiksCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBjb2woInZhbHVlLmlwIiksCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBjb2woInZhbHVlLmhvc3QiKSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvbCgidmFsdWUudXNlcl9pZCIpLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgY29sKCJnZW9kYXRhLmNvdW50cnkiKSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvbCgiZ2VvZGF0YS5zdGF0ZSIpLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgY29sKCJnZW9kYXRhLmNpdHkiKSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvbCgidmFsdWUudXNlcl9hZ2VudC5mYW1pbHkiKS5hbGlhcygiYnJvd3Nlcl9mYW1pbHkiKSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvbCgidmFsdWUudXNlcl9hZ2VudC5kZXZpY2UuZmFtaWx5IikuYWxpYXMoImRldmljZV9mYW1pbHkiKQogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgKSAgICAgLmNvdW50KCkgICAgIC5zZWxlY3QoCiAgICAgICAgY29sKCJob3N0IiksCiAgICAgICAgaGFzaChjb2woImlwIiksIHVuaXhfdGltZXN0YW1wKGNvbCgic2Vzc2lvbl93aW5kb3cuc3RhcnQiKSkuY2FzdCgic3RyaW5nIiksIGNvYWxlc2NlKAogICAgICAgICAgICBjb2woInVzZXJfaWQiKS5jYXN0KCJzdHJpbmciKSwgbGl0KCdsb2dnZWRfb3V0JykpKS5jYXN0KCJzdHJpbmciKS5hbGlhcygic2Vzc2lvbl9pZCIpLAogICAgICAgIGNvbCgidXNlcl9pZCIpLAogICAgICAgIGNvbCgidXNlcl9pZCIpLmlzTm90TnVsbCgpLmFsaWFzKCJpc19sb2dnZWRfaW4iKSwKICAgICAgICBjb2woImNvdW50cnkiKSwKICAgICAgICBjb2woInN0YXRlIiksCiAgICAgICAgY29sKCJjaXR5IiksCiAgICAgICAgY29sKCJicm93c2VyX2ZhbWlseSIpLAogICAgICAgIGNvbCgiZGV2aWNlX2ZhbWlseSIpLAogICAgICAgIGNvbCgic2Vzc2lvbl93aW5kb3cuc3RhcnQiKS5hbGlhcygid2luZG93X3N0YXJ0IiksCiAgICAgICAgY29sKCJzZXNzaW9uX3dpbmRvdy5lbmQiKS5hbGlhcygid2luZG93X2VuZCIpLAogICAgICAgIGNvbCgiY291bnQiKS5hbGlhcygiZXZlbnRfY291bnQiKSwKICAgICAgICBjb2woInNlc3Npb25fd2luZG93LnN0YXJ0IikuY2FzdCgiZGF0ZSIpLmFsaWFzKCJzZXNzaW9uX2RhdGUiKQogICAgKQoKcXVlcnkgPSBieV9jb3VudHJ5ICAgICAud3JpdGVTdHJlYW0gICAgIC5mb3JtYXQoImljZWJlcmciKSAgICAgLm91dHB1dE1vZGUoImFwcGVuZCIpICAgICAudHJpZ2dlcihwcm9jZXNzaW5nVGltZT0iNSBzZWNvbmRzIikgICAgIC5vcHRpb24oImZhbm91dC1lbmFibGVkIiwgInRydWUiKSAgICAgLm9wdGlvbigiY2hlY2twb2ludExvY2F0aW9uIiwgY2hlY2twb2ludF9sb2NhdGlvbikgICAgIC50b1RhYmxlKG91dHB1dF90YWJsZSkKCmpvYiA9IEpvYihnbHVlQ29udGV4dCkKam9iLmluaXQoYXJnc1siSk9CX05BTUUiXSwgYXJncykKCiMgc3RvcCB0aGUgam9iIGFmdGVyIDYwIG1pbnV0ZXMKIyBQTEVBU0UgRE8gTk9UIFJFTU9WRSBUSU1FT1VUCnF1ZXJ5LmF3YWl0VGVybWluYXRpb24odGltZW91dD02MCo2MCkKCiMjIyBGaW5hbCBHcmFkZQoKQmFzZWQgb24gdGhlIGV2YWx1YXRpb25zIGFib3ZlLCByZWNvbW1lbmQgYSBmaW5hbCBncmFkZSBhbmQgYSBicmllZiBzdW1tYXJ5IG9mIHRoZSBhc3Nlc3NtZW50Lg=="
+    decoded = base64.b64decode(user_prompt.encode('utf-8'))
+    user_prompt = decoded.decode('utf-8')
     user_prompt += "\n\n"
 
     # user_prompt += "# Additional Information"
@@ -384,7 +149,7 @@ Based on the evaluations above, recommend a final grade and a brief summary of t
 
 def get_response(system_prompt: str, user_prompt: str) -> str:
     response = client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4o",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -392,7 +157,6 @@ def get_response(system_prompt: str, user_prompt: str) -> str:
         temperature=0.1
     )
     comment = response.choices[0].message.content
-    # text = f"This is a LLM-generated comment: \n{comment if comment else 'No feedback generated.'}"
     return comment
 
 

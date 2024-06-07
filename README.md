@@ -38,7 +38,7 @@ Assignment
 ==================
 
 Your task is to write a streaming pipeline to understand DataExpert.io user behavior using sessionization. 
-Use the connectors and examples in the [airflow-dbt-project](https://github.com/DataExpert-io/airflow-dbt-project) repo to get started!
+Use the `glue_job_runner.py` connectors and examples in the [airflow-dbt-project](https://github.com/DataExpert-io/airflow-dbt-project) repo to get started. Copy and paste the DDL into `submission/session_ddl.sql` and copy the job into `submission/session_job.py`!
 
 ## Assignment Tasks
 

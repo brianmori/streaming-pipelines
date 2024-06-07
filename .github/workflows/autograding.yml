@@ -4,8 +4,8 @@ on:
   pull_request_target:
     types: [opened, synchronize]
     paths:
-      - "src/jobs/*.py"
-      - "src/unit_tests/*.py"
+      - "submission/*.py"
+      - "submission/*.sql"
 
 permissions:
   checks: write

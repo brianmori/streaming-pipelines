@@ -38,12 +38,14 @@ Assignment
 ==================
 
 Your task is to write a streaming pipeline to understand DataExpert.io user behavior using sessionization. 
+Use the connectors and examples in the [airflow-dbt-project](https://github.com/DataExpert-io/airflow-dbt-project) repo to get started!
 
 ## Assignment Tasks
 
 - Write a DDL query (`session_ddl.sql`) that creates a table that tracks Data Expert sessions. 
   - Make sure to have a unique identifier for each session
-  - how long the session was
+  - the start and end of the session
+  - a unique identifier for the session
   - how many events happened in that session
   - the date of the beginning of the session
   - What city, country, and state is associated with this session
@@ -55,7 +57,6 @@ Your task is to write a streaming pipeline to understand DataExpert.io user beha
   - It groups the Kafka events with a `session_window` with a 5-minute gap (sessions end after 5 minutes of inactivity)
     - It is also grouped by `user_id` and `ip` to track each user behavior
   - Make sure to increase the `timeout` of your job to `1 hour` so you can capture real sessions
-  - Create a unique identifier for each session called `session_id`
+  - Create a unique identifier for each session called `session_id` (you should think about using `hash` and the necessary columns to uniquely identify the session)
   - If `user_id` is not null, that means the event is from a logged in user
   - If a user logs in, that creates a new session (if you group by `ip` and `user_id` that solves the problem pretty elegantly)
-  - 

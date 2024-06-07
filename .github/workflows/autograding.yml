@@ -92,14 +92,9 @@ jobs:
         uses: tj-actions/changed-files@v44
         with:
           files: |
-            src/jobs/*.py
-            src/unit_tests/*.py
-          files_ignore: |
-            tests/**
-            .github/**/*
-            _app/**
-            Dockerfile
-      
+            submission/*.py
+            submission/*.sql
+
       - name: Get changed files in PR and push
         id: filtered-changed-files
         run: |
@@ -126,14 +121,6 @@ jobs:
               fi
             done
           fi
-
-      - name: Run step only if src file(s) changed
-        if: steps.filtered-changed-files.outputs.any_submission_changes == 'true'
-        env:
-          ALL_CHANGED_FILES: ${{ steps.filtered-changed-files.outputs.all_changed_submission_files }}
-        run: |
-          echo "One or more files in the `src/` folder has changed."
-          echo "Files changed in PR: '${ALL_CHANGED_FILES// /,}'"
 
   configure_environment:
     name: 'Configure environment'

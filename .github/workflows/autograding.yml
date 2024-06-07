@@ -147,7 +147,7 @@ jobs:
     needs: [check_files, configure_environment]
     if: needs.check_files.outputs.any_submission_changes == 'true'
     env:
-      SUBMISSION_DIR: 'src'
+      SUBMISSION_DIR: 'submission'
       ASSIGNMENT: ${{ needs.configure_environment.outputs.assignment }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       GITHUB_ORG: ${{ github.event.repository.owner.login }}
